@@ -1,0 +1,46 @@
+.noiri-service-panel[hidden] {
+  display: none !important;
+}
+
+[data-noiri-service-row] {
+  outline: none;
+}
+
+[data-noiri-service-row]:focus-visible {
+  box-shadow: 0 0 0 1px rgba(248, 248, 248, 0.35);
+}
+
+.noiri-service-list {
+  list-style: none;
+}
+
+.noiri-service-list-item {
+  color: var(--token-43d9b09c-4aaa-49ce-8e2e-f50a4e46d8e9, #f8f8f8);
+  display: flex;
+  font-family: "General Sans", "General Sans Placeholder", sans-serif;
+  font-size: 16px;
+  gap: 12px;
+  line-height: 1.5;
+}
+
+.noiri-service-list-bullet {
+  flex: none;
+  min-width: 18px;
+}
+
+.noiri-service-cta {
+  color: var(--token-43d9b09c-4aaa-49ce-8e2e-f50a4e46d8e9, #f8f8f8);
+  display: inline-block;
+  font-family: "General Sans", "General Sans Placeholder", sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.5;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 4px;
+}
+
+.noiri-service-cta:hover {
+  color: var(--token-43d9b09c-4aaa-49ce-8e2e-f50a4e46d8e9, #f8f8f8);
+}

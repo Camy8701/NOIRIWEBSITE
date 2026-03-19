@@ -99,6 +99,12 @@ RUNTIME_SRCSET_PATTERN = re.compile(r"srcSet:(?P<quote>['\"`])(?P<value>[^'\"`]+
 ROUTE_PATH_PATTERN = re.compile(r"path:`(/[^`]+|/)`")
 CANONICAL_PATTERN = re.compile(r"siteCanonicalURL:`[^`]*`")
 EDITOR_INIT_PATTERN = re.compile(r"import\(`https://framer\.com/edit/init\.mjs`\)")
+LOW_OPACITY_PATTERN = re.compile(r"^0(?:\.0+)?(?:1)?$")
+TRANSLATE_Y_PATTERN = re.compile(r"translateY\([^)]*\)")
+FRAMER_BADGE_STYLE_PATTERN = re.compile(
+    r"@supports \(z-index:calc\(infinity\)\)\{#__framer-badge-container\{--infinity:infinity\}\}"
+    r"#__framer-badge-container\{[^}]+\}"
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parent
@@ -126,6 +132,62 @@ SESSION.headers.update(
 )
 ASSET_CACHE: dict[str, Path] = {}
 INERT_FRAMER_HREF = "javascript:void(0)"
+HOST_DIR_MAP = {
+    "framerusercontent.com": "content",
+    "noiristudio.framer.website": "site",
+    "framer.com": "support",
+}
+SERVICE_DETAILS = {
+    "Photography": {
+        "description": (
+            "Our photography blends cinematic atmosphere with editorial precision to "
+            "create imagery that feels intentional, expressive, and timeless. Every "
+            "frame is crafted to highlight emotion, detail, and story."
+        ),
+        "items": [
+            "Cinematic & Editorial Photoshoots",
+            "On-site or Studio Production",
+            "High-Resolution Final Images",
+            "Curated Photo Selections",
+        ],
+    },
+    "Cinematography": {
+        "description": (
+            "We produce cinematic films that merge narrative depth with visual polish, "
+            "designed to communicate your brand or story with clarity and impact."
+        ),
+        "items": [
+            "Concept & Story Development",
+            "High-End Video Production",
+            "Cinematic Editing & Color Grading",
+            "Final Deliverables in Multiple Formats",
+        ],
+    },
+    "Retouching": {
+        "description": (
+            "Our retouching elevates each image through refined beauty work, texture "
+            "control, and tonal balance while preserving realism and editorial quality."
+        ),
+        "items": [
+            "Editorial Beauty Retouch",
+            "Color Correction & Grading",
+            "Cleanup & Background Refinement",
+            "Final High-End Export",
+        ],
+    },
+    "Art Direction": {
+        "description": (
+            "We guide the visual identity of each project through concept development, "
+            "styling, and cohesive direction to ensure every frame serves a clear creative vision."
+        ),
+        "items": [
+            "Creative Concept Development",
+            "Moodboards & Visual Planning",
+            "Styling & Set Direction",
+            "Narrative & Aesthetic Guidance",
+        ],
+    },
+}
 
 
 def normalize_route(path: str) -> str:
@@ -244,7 +306,7 @@ def guess_extension(url: str, content_type: str) -> str:
 
 def asset_output_path(url: str, content_type: str = "") -> Path:
     parsed = urlparse(url)
-    host_dir = parsed.netloc.replace(":", "_")
+    host_dir = HOST_DIR_MAP.get(parsed.netloc, parsed.netloc.replace(":", "_"))
     raw_path = parsed.path.lstrip("/")
     if not raw_path:
         raw_path = "asset"
@@ -503,57 +565,220 @@ def rewrite_inline_script(script_text: str, page_url: str, page_output: Path, pa
     return rewrite_text_urls(script_text, page_url, page_output, page_route=page_route)
 
 
+def script_contains(script: html.HtmlElement, needle: str) -> bool:
+    return needle in ((script.text or "").strip())
+
+
+def drop_runtime_nodes(doc: html.HtmlElement) -> None:
+    for meta in doc.xpath("//meta[translate(@name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='generator']"):
+        parent = meta.getparent()
+        if parent is not None:
+            parent.remove(meta)
+
+    for meta in doc.xpath("//meta[starts-with(translate(@name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'framer-search-index')]"):
+        parent = meta.getparent()
+        if parent is not None:
+            parent.remove(meta)
+
+    for link in doc.xpath("//link[contains(concat(' ', normalize-space(@rel), ' '), ' modulepreload ')]"):
+        parent = link.getparent()
+        if parent is not None:
+            parent.remove(link)
+
+    for script in doc.xpath("//script"):
+        script_type = (script.get("type") or "").strip().lower()
+        if script_type.startswith("framer/"):
+            parent = script.getparent()
+            if parent is not None:
+                parent.remove(script)
+            continue
+        if script.get("data-framer-appear-animation") is not None:
+            parent = script.getparent()
+            if parent is not None:
+                parent.remove(script)
+            continue
+        if script_type == "module" and script.get("data-framer-bundle") is not None:
+            parent = script.getparent()
+            if parent is not None:
+                parent.remove(script)
+            continue
+        if any(
+            script_contains(script, needle)
+            for needle in (
+                "__framer_force_showing_editorbar_since",
+                "var animator=(()=>{",
+                'document.querySelectorAll("[data-nested-link]")',
+                "var w=\"framer_variant\"",
+                'NODE_ENV:"production"',
+            )
+        ):
+            parent = script.getparent()
+            if parent is not None:
+                parent.remove(script)
+
+    for node in doc.xpath('//*[@id="__framer-badge-container"] | //*[@id="template-overlay"]'):
+        parent = node.getparent()
+        if parent is not None:
+            parent.remove(node)
+
+
+def clean_inert_links(doc: html.HtmlElement) -> None:
+    for anchor in doc.xpath("//a[@href='javascript:void(0)']"):
+        for attr in ("href", "target", "rel"):
+            if attr in anchor.attrib:
+                del anchor.attrib[attr]
+        anchor.tag = "span"
+
+
+def clean_runtime_attributes(doc: html.HtmlElement) -> None:
+    for attr in (
+        "data-framer-hydrate-v2",
+        "data-framer-generated-page",
+        "data-framer-ssr-released-at",
+        "data-framer-page-optimized-at",
+        "data-framer-root",
+        "data-framer-cursor",
+    ):
+        for el in doc.xpath(f"//*[@{attr}]"):
+            if attr in el.attrib:
+                del el.attrib[attr]
+
+
+def normalize_style(style_value: str, *, force_motion_reset: bool = False) -> str:
+    declarations: list[tuple[str, str]] = []
+    low_opacity = False
+    for part in style_value.split(";"):
+        if ":" not in part:
+            continue
+        prop, value = part.split(":", 1)
+        prop = prop.strip().lower()
+        value = value.strip()
+        if not prop:
+            continue
+        if prop == "opacity" and LOW_OPACITY_PATTERN.match(value):
+            low_opacity = True
+        declarations.append((prop, value))
+
+    animate = force_motion_reset or low_opacity
+
+    if not animate:
+        for prop, value in declarations:
+            if prop != "transform":
+                continue
+            match = re.search(r"translateY\((-?\d+(?:\.\d+)?)px\)", value)
+            if match and abs(float(match.group(1))) >= 24:
+                animate = True
+                break
+
+    normalized: list[tuple[str, str]] = []
+    for prop, value in declarations:
+        if prop == "will-change":
+            continue
+        if prop == "opacity" and (animate or LOW_OPACITY_PATTERN.match(value)):
+            value = "1"
+        elif prop == "transform" and animate:
+            value = TRANSLATE_Y_PATTERN.sub("translateY(0px)", value)
+        normalized.append((prop, value))
+
+    return ";".join(f"{prop}:{value}" for prop, value in normalized)
+
+
+def normalize_motion_markup(doc: html.HtmlElement) -> None:
+    for el in doc.iter():
+        style_value = el.get("style")
+        if not style_value:
+            continue
+        force_motion_reset = el.get("data-framer-appear-id") is not None
+        if not force_motion_reset and "opacity:" not in style_value and "will-change:" not in style_value:
+            continue
+        new_style = normalize_style(style_value, force_motion_reset=force_motion_reset)
+        if new_style:
+            el.set("style", new_style)
+        elif "style" in el.attrib:
+            del el.attrib["style"]
+
+
+def clean_style_blocks(doc: html.HtmlElement) -> None:
+    for style_tag in doc.xpath("//style"):
+        if not style_tag.text:
+            continue
+        style_tag.text = FRAMER_BADGE_STYLE_PATTERN.sub("", style_tag.text)
+
+
+def build_service_panel(detail: dict[str, list[str] | str], contact_href: str) -> html.HtmlElement:
+    description = html_stdlib.escape(str(detail["description"]))
+    items = "".join(
+        (
+            '<li class="noiri-service-list-item">'
+            '<span class="noiri-service-list-bullet">--</span>'
+            f"<span>{html_stdlib.escape(item)}</span>"
+            "</li>"
+        )
+        for item in detail["items"]
+    )
+    snippet = f"""
+    <div class="framer-jknhlk noiri-service-panel" hidden aria-hidden="true">
+      <div class="framer-v95lb0">
+        <div class="framer-sq6hi3" data-framer-component-type="RichTextContainer">
+          <p class="framer-text framer-styles-preset-1ljkjf9" data-styles-preset="Aren2whxy">{description}</p>
+        </div>
+      </div>
+      <div class="framer-41zn2m">
+        <ul class="framer-4d30w1 noiri-service-list">{items}</ul>
+      </div>
+      <div class="framer-umqj99">
+        <div class="framer-1lkwpva-container">
+          <a class="noiri-service-cta" href="{contact_href}">Book a Call</a>
+        </div>
+      </div>
+    </div>
+    """.strip()
+    return html.fragment_fromstring(snippet)
+
+
+def augment_services_page(doc: html.HtmlElement, page_route: str) -> None:
+    contact_href = route_relative_href(page_route, "/contact")
+    rows = doc.xpath(
+        "//*[@data-framer-name='Row Close' or @data-framer-name='Row Close Phone']"
+    )
+    for row in rows:
+        title = " ".join(" ".join(row.xpath(".//h1/text() | .//h2/text() | .//p/text()")).split())
+        if title not in SERVICE_DETAILS:
+            continue
+        row.set("data-noiri-service-row", title.lower().replace(" ", "-"))
+        row.set("data-noiri-service-open-class", "framer-v-iivdbu" if "Phone" in (row.get("data-framer-name") or "") else "framer-v-14lylx1")
+        row.set("role", "button")
+        row.set("tabindex", "0")
+        row.set("aria-expanded", "false")
+        if not row.xpath(".//*[contains(@class, 'noiri-service-panel')]"):
+            row.append(build_service_panel(SERVICE_DETAILS[title], contact_href))
+
+
 def inject_runtime_helpers(doc: html.HtmlElement, page_route: str) -> None:
     head = doc.find("head")
     body = doc.find("body")
     if head is None or body is None:
         return
 
-    badge_style = html.fragment_fromstring(
-        "<style>#__framer-badge-container{display:none!important;visibility:hidden!important;pointer-events:none!important}</style>"
+    style_href = route_relative_href(page_route, "/") + "assets/local/site.css"
+    head.append(
+        html.fragment_fromstring(
+            f'<link rel="stylesheet" href="{versioned_href(style_href)}">'
+        )
     )
-    head.append(badge_style)
 
-    base_script = html.fragment_fromstring(
-        f"""
-        <script>
-        window.__NOIRI_ROUTE_PATH__ = {page_route!r};
-        window.__NOIRI_BASE_PATH__ = (() => {{
-            const normalize = (value) => {{
-                let next = (value || "/").replace(/\\/index\\.html$/, "");
-                if (next.length > 1 && next.endsWith("/")) next = next.slice(0, -1);
-                return next || "/";
-            }};
-            const current = normalize(window.location.pathname);
-            const route = normalize(window.__NOIRI_ROUTE_PATH__);
-            if (route === "/") return current === "/" ? "" : current;
-            if (current === route) return "";
-            if (current.endsWith(route)) return current.slice(0, -route.length) || "";
-            return "";
-        }})();
-        </script>
-        """.strip()
-    )
-    inserted = False
-    for script in head.xpath(".//script[@type='module']"):
-        script.addprevious(base_script)
-        inserted = True
-        break
-    if not inserted:
-        head.append(base_script)
-
+    site_script_src = route_relative_href(page_route, "/") + "assets/local/site.js"
     form_handler_src = route_relative_href(page_route, "/") + "assets/local/form-handler.js"
-    form_script = html.fragment_fromstring(
-        f'<script src="{versioned_href(form_handler_src)}" defer></script>'
+    body.append(
+        html.fragment_fromstring(
+            f'<script src="{versioned_href(site_script_src)}" defer></script>'
+        )
     )
-    body.append(form_script)
-
-
-def remove_framer_badge(doc: html.HtmlElement) -> None:
-    for node in doc.xpath('//*[@id="__framer-badge-container"]'):
-        parent = node.getparent()
-        if parent is not None:
-            parent.remove(node)
+    body.append(
+        html.fragment_fromstring(
+            f'<script src="{versioned_href(form_handler_src)}" defer></script>'
+        )
+    )
 
 
 def rewrite_page(route: str) -> None:
@@ -567,6 +792,8 @@ def rewrite_page(route: str) -> None:
         parent = base.getparent()
         if parent is not None:
             parent.remove(base)
+
+    drop_runtime_nodes(doc)
 
 
     for script in doc.xpath("//script[@src]"):
@@ -697,11 +924,18 @@ def rewrite_page(route: str) -> None:
         if script.text:
             script.text = rewrite_inline_script(script.text, page_url, page_output_path(route), route)
 
+    normalize_motion_markup(doc)
+    clean_style_blocks(doc)
+    clean_runtime_attributes(doc)
+    clean_inert_links(doc)
+    if route == "/services":
+        augment_services_page(doc, route)
     inject_runtime_helpers(doc, route)
 
     output = page_output_path(route)
     ensure_parent(output)
     rendered = html.tostring(doc, encoding="unicode", method="html", doctype="<!DOCTYPE html>")
+    rendered = rendered.replace("<!--$-->", "").replace("<!--/$-->", "")
     output.write_text(rendered, encoding="utf-8")
 
     if route == "/404":
