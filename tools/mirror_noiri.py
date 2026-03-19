@@ -89,6 +89,10 @@ FRAMER_CMS_PATTERN = re.compile(
 RELATIVE_TEXT_ASSET_PATTERN = re.compile(
     r"(?P<quote>['\"`])(?P<spec>(?:\./|\.\./)[^'\"`\s]+?\.(?:avif|bmp|css|gif|ico|jpe?g|js|json|mjs|mp4|otf|png|svg|ttf|txt|webm|webmanifest|webp|woff2?|xml))(?P=quote)"
 )
+RUNTIME_ASSET_LITERAL_PATTERN = re.compile(
+    r"(?<!new URL\()(?P<quote>['\"`])(?P<spec>(?:\./|\.\./)[^'\"`\s]+?\.(?:avif|bmp|gif|ico|jpe?g|mp4|otf|pdf|png|svg|ttf|txt|wav|webm|webp|woff2?))(?:\?(?:[^'\"`#\s]+))?(?:#[^'\"`\s]+)?(?P=quote)"
+)
+RUNTIME_SRCSET_PATTERN = re.compile(r"srcSet:(?P<quote>['\"`])(?P<value>[^'\"`]+)(?P=quote)")
 ROUTE_PATH_PATTERN = re.compile(r"path:`(/[^`]+|/)`")
 CANONICAL_PATTERN = re.compile(r"siteCanonicalURL:`[^`]*`")
 EDITOR_INIT_PATTERN = re.compile(r"import\(`https://framer\.com/edit/init\.mjs`\)")
@@ -225,6 +229,17 @@ def ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def decode_text_response(response: requests.Response) -> str:
+    for encoding in ("utf-8", response.encoding, response.apparent_encoding):
+        if not encoding:
+            continue
+        try:
+            return response.content.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return response.text
+
+
 def remove_generated_output() -> None:
     for path in [
         MIRROR_ROOT,
@@ -289,6 +304,20 @@ def patch_framer_module(text: str, output_path: Path) -> str:
 
 
 def rewrite_text_urls(text: str, source_url: str, output_path: Path, page_route: str | None = None) -> str:
+    def localize_runtime_spec(spec: str) -> str | None:
+        candidate = (output_path.parent / spec).resolve()
+        try:
+            candidate.relative_to(REPO_ROOT)
+        except ValueError:
+            candidate = None
+        if candidate is not None and candidate.exists():
+            return spec
+        absolute = urljoin(source_url, spec)
+        if not should_localize_asset(absolute):
+            return None
+        local_output = localize_asset(absolute)
+        return asset_relative_href(output_path, local_output)
+
     def replace_framer_cms(match: re.Match[str]) -> str:
         relative_file = match.group("file")
         base_spec = match.group("base")
@@ -323,10 +352,35 @@ def rewrite_text_urls(text: str, source_url: str, output_path: Path, page_route:
             localize_asset(absolute)
         return match.group(0)
 
+    def rewrite_runtime_asset_literal(match: re.Match[str]) -> str:
+        spec = match.group("spec")
+        rel = localize_runtime_spec(spec)
+        if rel is None:
+            return match.group(0)
+        quote = match.group("quote")
+        return f"new URL({quote}{rel}{quote},import.meta.url).href"
+
+    def rewrite_runtime_srcset(match: re.Match[str]) -> str:
+        parts: list[str] = []
+        for item in match.group("value").split(","):
+            entry = item.strip()
+            if not entry:
+                continue
+            bits = entry.split()
+            spec = bits[0]
+            rel = localize_runtime_spec(spec)
+            if rel is None:
+                return match.group(0)
+            descriptor = f" {' '.join(bits[1:])}" if len(bits) > 1 else ""
+            parts.append(f"${{new URL(`{rel}`,import.meta.url).href}}{descriptor}")
+        return f"srcSet:`{', '.join(parts)}`"
+
     rewritten = FRAMER_CMS_PATTERN.sub(replace_framer_cms, text)
     rewritten = RELATIVE_TEXT_ASSET_PATTERN.sub(ensure_relative_asset, rewritten)
     rewritten = URL_PATTERN.sub(replace_absolute, rewritten)
     if output_path.suffix == ".mjs":
+        rewritten = RUNTIME_SRCSET_PATTERN.sub(rewrite_runtime_srcset, rewritten)
+        rewritten = RUNTIME_ASSET_LITERAL_PATTERN.sub(rewrite_runtime_asset_literal, rewritten)
         rewritten = patch_framer_module(rewritten, output_path)
     return rewritten
 
@@ -361,7 +415,7 @@ def localize_asset(url: str) -> Path:
     ensure_parent(output_path)
 
     if is_text_asset(output_path, response.headers.get("content-type", "")):
-        text = response.text
+        text = decode_text_response(response)
         text = rewrite_text_urls(text, url, output_path)
         if output_path.suffix == ".css":
             text = rewrite_css_urls(text, url, output_path)
@@ -396,6 +450,11 @@ def inject_runtime_helpers(doc: html.HtmlElement, page_route: str) -> None:
     body = doc.find("body")
     if head is None or body is None:
         return
+
+    badge_style = html.fragment_fromstring(
+        "<style>#__framer-badge-container{display:none!important;visibility:hidden!important;pointer-events:none!important}</style>"
+    )
+    head.append(badge_style)
 
     base_script = html.fragment_fromstring(
         f"""
@@ -444,14 +503,13 @@ def rewrite_page(route: str) -> None:
     response = SESSION.get(page_url, timeout=60)
     if route != "/404" or response.status_code < 400:
         response.raise_for_status()
-    doc = html.fromstring(response.text, base_url=page_url)
+    doc = html.fromstring(decode_text_response(response), base_url=page_url)
 
     for base in doc.xpath("//base"):
         parent = base.getparent()
         if parent is not None:
             parent.remove(base)
 
-    remove_framer_badge(doc)
 
     for script in doc.xpath("//script[@src]"):
         src = script.get("src")
@@ -490,6 +548,8 @@ def rewrite_page(route: str) -> None:
             continue
         prop = (meta.get("property") or "").lower()
         name = (meta.get("name") or "").lower()
+        if not content.startswith(("/", "./", "../", "http://", "https://")):
+            continue
         absolute = urljoin(page_url, html_stdlib.unescape(content))
         if prop == "og:url" or name == "twitter:url":
             parent = meta.getparent()
@@ -522,10 +582,6 @@ def rewrite_page(route: str) -> None:
                 el.set("href", route_relative_href(route, target_route))
             elif should_localize_asset(absolute):
                 el.set("href", asset_relative_href(page_output_path(route), localize_asset(absolute)))
-            elif absolute.startswith("https://www.framer.com"):
-                parent = el.getparent()
-                if parent is not None:
-                    parent.remove(el)
             elif not should_keep_external_link(absolute):
                 el.set("href", href)
             continue

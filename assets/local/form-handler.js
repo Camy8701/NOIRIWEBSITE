@@ -1,5 +1,6 @@
 (() => {
   const NOTICE_ATTR = "data-local-form-notice";
+  const HANDLER_ATTR = "data-local-form-handler";
 
   function ensureNotice(form) {
     let notice = form.querySelector(`[${NOTICE_ATTR}]`);
@@ -19,50 +20,43 @@
     return notice;
   }
 
-  function bindForm(form) {
-    if (form.dataset.localStubBound === "true") return;
-    form.dataset.localStubBound = "true";
-
+  function handleSubmit(form, event) {
     const submitButton = form.querySelector('button[type="submit"], input[type="submit"]');
     const notice = ensureNotice(form);
+    event.preventDefault();
+    event.stopImmediatePropagation();
 
-    form.addEventListener(
-      "submit",
-      (event) => {
-        event.preventDefault();
-        event.stopImmediatePropagation();
+    const data = new FormData(form);
+    const rawName = String(data.get("Name") || "").trim();
+    const name = rawName || "there";
 
-        const data = new FormData(form);
-        const rawName = String(data.get("Name") || "").trim();
-        const name = rawName || "there";
+    if (submitButton) {
+      submitButton.disabled = true;
+      submitButton.setAttribute("aria-busy", "true");
+    }
 
-        if (submitButton) {
-          submitButton.disabled = true;
-          submitButton.setAttribute("aria-busy", "true");
-        }
+    window.setTimeout(() => {
+      notice.hidden = false;
+      notice.textContent = `Thanks, ${name}. This standalone replica uses a local contact stub, so the message is saved only in your browser session and is not sent to a remote backend.`;
+      form.dataset.localSubmitted = "true";
 
-        window.setTimeout(() => {
-          notice.hidden = false;
-          notice.textContent = `Thanks, ${name}. This standalone replica uses a local contact stub, so the message is saved only in your browser session and is not sent to a remote backend.`;
-          form.dataset.localSubmitted = "true";
-
-          if (submitButton) {
-            submitButton.disabled = false;
-            submitButton.removeAttribute("aria-busy");
-          }
-        }, 160);
-      },
-      true
-    );
+      if (submitButton) {
+        submitButton.disabled = false;
+        submitButton.removeAttribute("aria-busy");
+      }
+    }, 160);
   }
 
-  function init() {
-    document.querySelectorAll("form").forEach(bindForm);
-  }
+  if (window[HANDLER_ATTR]) return;
+  window[HANDLER_ATTR] = true;
 
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init, { once: true });
-  } else {
-    init();
-  }
+  document.addEventListener(
+    "submit",
+    (event) => {
+      const form = event.target;
+      if (!(form instanceof HTMLFormElement)) return;
+      handleSubmit(form, event);
+    },
+    true
+  );
 })();
