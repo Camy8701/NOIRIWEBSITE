@@ -79,3 +79,70 @@
 .noiri-service-cta:hover {
   color: var(--token-43d9b09c-4aaa-49ce-8e2e-f50a4e46d8e9, #f8f8f8);
 }
+
+.noiri-process-ready [data-framer-name="First Image"] {
+  opacity: 0 !important;
+  pointer-events: none;
+}
+
+.noiri-process-stage {
+  align-items: center;
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  pointer-events: none;
+  position: absolute;
+  z-index: 3;
+}
+
+.noiri-process-shell {
+  height: 250px;
+  perspective: 1600px;
+  transform: translateZ(0);
+  transform-origin: center center;
+  width: 200px;
+  will-change: height, width;
+}
+
+.noiri-process-card {
+  height: 100%;
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 0.56s cubic-bezier(0.22, 1, 0.36, 1);
+  width: 100%;
+  will-change: transform;
+}
+
+.noiri-process-stage.is-flipping .noiri-process-card {
+  transform: rotateY(180deg);
+}
+
+.noiri-process-stage.noiri-process-no-transition .noiri-process-card {
+  transition: none;
+}
+
+.noiri-process-face {
+  backface-visibility: hidden;
+  inset: 0;
+  overflow: hidden;
+  position: absolute;
+}
+
+.noiri-process-face-back {
+  transform: rotateY(180deg);
+}
+
+.noiri-process-face-image {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .noiri-process-shell {
+    transition:
+      height 0.5s cubic-bezier(0.22, 1, 0.36, 1),
+      width 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
