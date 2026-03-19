@@ -83,6 +83,9 @@ ATTRS_WITH_URLS = (
     "content",
 )
 URL_PATTERN = re.compile(r"https://[^\s\"'<>`)]+")
+FRAMER_CMS_PATTERN = re.compile(
+    r"new URL\(`(?P<file>\./[^`]+\.framercms)`,`(?P<base>(?:https://framerusercontent\.com/modules/[^`]+\.js|\.\./\.\./modules/[^`]+\.js))`\)\.href\.replace\(`/modules/`,`/cms/`\)"
+)
 RELATIVE_TEXT_ASSET_PATTERN = re.compile(
     r"(?P<quote>['\"`])(?P<spec>(?:\./|\.\./)[^'\"`\s]+?\.(?:avif|bmp|css|gif|ico|jpe?g|js|json|mjs|mp4|otf|png|svg|ttf|txt|webm|webmanifest|webp|woff2?|xml))(?P=quote)"
 )
@@ -286,6 +289,16 @@ def patch_framer_module(text: str, output_path: Path) -> str:
 
 
 def rewrite_text_urls(text: str, source_url: str, output_path: Path, page_route: str | None = None) -> str:
+    def replace_framer_cms(match: re.Match[str]) -> str:
+        relative_file = match.group("file")
+        base_spec = match.group("base")
+        modules_url = base_spec if base_spec.startswith("http") else urljoin(source_url, base_spec)
+        cms_base = modules_url.replace("/modules/", "/cms/", 1)
+        cms_url = urljoin(cms_base, relative_file)
+        local_output = localize_asset(cms_url)
+        rel = asset_relative_href(output_path, local_output)
+        return f"new URL(`{rel}`,import.meta.url).href"
+
     def replace_absolute(match: re.Match[str]) -> str:
         raw_url = html_stdlib.unescape(match.group(0))
         if raw_url.startswith("https://events.framer.com"):
@@ -310,7 +323,8 @@ def rewrite_text_urls(text: str, source_url: str, output_path: Path, page_route:
             localize_asset(absolute)
         return match.group(0)
 
-    rewritten = RELATIVE_TEXT_ASSET_PATTERN.sub(ensure_relative_asset, text)
+    rewritten = FRAMER_CMS_PATTERN.sub(replace_framer_cms, text)
+    rewritten = RELATIVE_TEXT_ASSET_PATTERN.sub(ensure_relative_asset, rewritten)
     rewritten = URL_PATTERN.sub(replace_absolute, rewritten)
     if output_path.suffix == ".mjs":
         rewritten = patch_framer_module(rewritten, output_path)
