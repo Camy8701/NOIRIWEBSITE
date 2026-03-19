@@ -125,7 +125,62 @@
     });
   }
 
+  function initMotion() {
+    const elements = Array.from(document.querySelectorAll("[data-noiri-animate]")).filter(
+      (node) => node instanceof HTMLElement,
+    );
+    if (!elements.length) return;
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      document.documentElement.classList.remove("noiri-motion-enabled");
+      elements.forEach((element) => element.classList.add("noiri-animated"));
+      return;
+    }
+
+    const inlineGroups = new Map();
+    elements.forEach((element) => {
+      if (element.dataset.noiriAnimate !== "inline" || !element.parentElement) return;
+      const group = inlineGroups.get(element.parentElement) || [];
+      group.push(element);
+      inlineGroups.set(element.parentElement, group);
+    });
+
+    inlineGroups.forEach((group) => {
+      group.forEach((element, index) => {
+        const existingDelay = parseFloat(element.style.getPropertyValue("--noiri-delay")) || 0;
+        element.style.setProperty("--noiri-delay", `${existingDelay + index * 0.04}s`);
+      });
+    });
+
+    const reveal = (element) => {
+      if (element.classList.contains("noiri-animated")) return;
+      element.classList.add("noiri-animated");
+    };
+
+    if (!("IntersectionObserver" in window)) {
+      elements.forEach(reveal);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (!entry.isIntersecting) return;
+          reveal(entry.target);
+          observer.unobserve(entry.target);
+        });
+      },
+      {
+        rootMargin: "0px 0px -12% 0px",
+        threshold: 0.18,
+      },
+    );
+
+    elements.forEach((element) => observer.observe(element));
+  }
+
   document.addEventListener("DOMContentLoaded", () => {
+    initMotion();
     initMobileMenu();
     initServiceAccordion();
     initNestedLinks();

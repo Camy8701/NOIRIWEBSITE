@@ -101,6 +101,7 @@ CANONICAL_PATTERN = re.compile(r"siteCanonicalURL:`[^`]*`")
 EDITOR_INIT_PATTERN = re.compile(r"import\(`https://framer\.com/edit/init\.mjs`\)")
 LOW_OPACITY_PATTERN = re.compile(r"^0(?:\.0+)?(?:1)?$")
 TRANSLATE_Y_PATTERN = re.compile(r"translateY\([^)]*\)")
+SCALE_PATTERN = re.compile(r"scale\([^)]*\)")
 FRAMER_BADGE_STYLE_PATTERN = re.compile(
     r"@supports \(z-index:calc\(infinity\)\)\{#__framer-badge-container\{--infinity:infinity\}\}"
     r"#__framer-badge-container\{[^}]+\}"
@@ -188,6 +189,71 @@ SERVICE_DETAILS = {
         ],
     },
 }
+
+
+def format_number(value: float | int | str) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.4f}".rstrip("0").rstrip(".")
+
+
+def parse_style_declarations(style_value: str) -> list[tuple[str, str]]:
+    declarations: list[tuple[str, str]] = []
+    for part in style_value.split(";"):
+        if ":" not in part:
+            continue
+        prop, value = part.split(":", 1)
+        prop = prop.strip()
+        value = value.strip()
+        if prop:
+            declarations.append((prop, value))
+    return declarations
+
+
+def serialize_style_declarations(declarations: list[tuple[str, str]]) -> str:
+    return ";".join(f"{prop}:{value}" for prop, value in declarations if prop)
+
+
+def get_style_property(style_value: str, prop_name: str) -> str | None:
+    lookup = prop_name.lower()
+    for prop, value in parse_style_declarations(style_value):
+        if prop.lower() == lookup:
+            return value
+    return None
+
+
+def set_style_properties(style_value: str, updates: dict[str, str | None]) -> str:
+    lookup = {key.lower(): value for key, value in updates.items()}
+    declarations = parse_style_declarations(style_value)
+    seen: set[str] = set()
+    rewritten: list[tuple[str, str]] = []
+    for prop, value in declarations:
+        key = prop.lower()
+        if key in lookup:
+            seen.add(key)
+            replacement = lookup[key]
+            if replacement is None:
+                continue
+            rewritten.append((prop, replacement))
+            continue
+        rewritten.append((prop, value))
+    for key, value in lookup.items():
+        if key in seen or value is None:
+            continue
+        rewritten.append((key, value))
+    return serialize_style_declarations(rewritten)
+
+
+def add_class(el: html.HtmlElement, class_name: str) -> None:
+    classes = [item for item in (el.get("class") or "").split() if item]
+    if class_name not in classes:
+        classes.append(class_name)
+    if classes:
+        el.set("class", " ".join(classes))
 
 
 def normalize_route(path: str) -> str:
@@ -638,10 +704,86 @@ def clean_runtime_attributes(doc: html.HtmlElement) -> None:
         "data-framer-page-optimized-at",
         "data-framer-root",
         "data-framer-cursor",
+        "data-framer-appear-id",
     ):
         for el in doc.xpath(f"//*[@{attr}]"):
             if attr in el.attrib:
                 del el.attrib[attr]
+
+
+def extract_appear_animations(doc: html.HtmlElement) -> dict[str, dict[str, object]]:
+    animations: dict[str, dict[str, object]] = {}
+    for script in doc.xpath("//script[@id='__framer__appearAnimationsContent']"):
+        raw = (script.text or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for appear_id, variants in parsed.items():
+            if not isinstance(variants, dict):
+                continue
+            state = variants.get("default")
+            if not isinstance(state, dict) and variants:
+                state = next(iter(variants.values()))
+            if not isinstance(state, dict):
+                continue
+            animate = state.get("animate")
+            transition = animate.get("transition") if isinstance(animate, dict) else {}
+            animations[appear_id] = {
+                "animate": animate if isinstance(animate, dict) else {},
+                "delay": float(transition.get("delay", 0) or 0),
+                "duration": float(transition.get("duration", 0.8) or 0.8),
+            }
+    return animations
+
+
+def apply_appear_transform(original_transform: str | None, animate: dict[str, object]) -> str:
+    transform = (original_transform or "none").strip() or "none"
+    target = transform
+
+    y = animate.get("y")
+    if y is not None:
+        replacement = f"translateY({format_number(y)}px)"
+        if TRANSLATE_Y_PATTERN.search(target):
+            target = TRANSLATE_Y_PATTERN.sub(replacement, target)
+        elif float(y) != 0:
+            target = f"{'' if target == 'none' else target + ' '}{replacement}".strip()
+
+    scale = animate.get("scale")
+    if scale is not None:
+        replacement = f"scale({format_number(scale)})"
+        if SCALE_PATTERN.search(target):
+            target = SCALE_PATTERN.sub(replacement, target)
+        elif float(scale) != 1:
+            target = f"{'' if target == 'none' else target + ' '}{replacement}".strip()
+
+    return target or "none"
+
+
+def apply_appear_style(
+    final_style: str,
+    original_style: str,
+    appear_config: dict[str, object] | None,
+) -> str:
+    if not appear_config:
+        return final_style
+    animate = appear_config.get("animate", {})
+    if not isinstance(animate, dict):
+        return final_style
+
+    updates: dict[str, str | None] = {}
+    if "opacity" in animate:
+        updates["opacity"] = format_number(animate["opacity"])
+
+    original_transform = get_style_property(original_style, "transform")
+    if original_transform is not None:
+        updates["transform"] = apply_appear_transform(original_transform, animate)
+
+    return set_style_properties(final_style, updates)
 
 
 def normalize_style(style_value: str, *, force_motion_reset: bool = False) -> str:
@@ -683,15 +825,98 @@ def normalize_style(style_value: str, *, force_motion_reset: bool = False) -> st
     return ";".join(f"{prop}:{value}" for prop, value in normalized)
 
 
-def normalize_motion_markup(doc: html.HtmlElement) -> None:
+def classify_motion_element(
+    el: html.HtmlElement,
+    style_value: str,
+    *,
+    force_motion_reset: bool = False,
+) -> str | None:
+    if force_motion_reset:
+        return "block"
+
+    opacity = get_style_property(style_value, "opacity") or ""
+    style_lower = style_value.lower()
+    has_low_opacity = bool(opacity and LOW_OPACITY_PATTERN.match(opacity))
+    has_translate_y = "translatey(" in style_lower
+
+    if el.tag.lower() == "span" and has_low_opacity and has_translate_y and "display:inline-block" in style_lower:
+        return "inline"
+
+    if has_low_opacity:
+        return "block"
+
+    if "will-change:" in style_lower and has_translate_y:
+        return "block"
+
+    return None
+
+
+def annotate_motion_element(
+    el: html.HtmlElement,
+    original_style: str,
+    final_style: str,
+    motion_type: str,
+    appear_config: dict[str, object] | None = None,
+) -> str:
+    from_opacity = get_style_property(original_style, "opacity") or "1"
+    to_opacity = get_style_property(final_style, "opacity") or "1"
+    from_transform = get_style_property(original_style, "transform") or "none"
+    to_transform = get_style_property(final_style, "transform") or "none"
+
+    if from_opacity == to_opacity and from_transform == to_transform:
+        return final_style
+
+    duration = 0.6 if motion_type == "inline" else 0.8
+    delay = 0.0
+    if appear_config:
+        duration = float(appear_config.get("duration", duration) or duration)
+        delay = float(appear_config.get("delay", delay) or delay)
+
+    style_with_motion = set_style_properties(
+        final_style,
+        {
+            "--noiri-from-opacity": from_opacity,
+            "--noiri-to-opacity": to_opacity,
+            "--noiri-from-transform": from_transform,
+            "--noiri-to-transform": to_transform,
+            "--noiri-duration": f"{format_number(duration)}s",
+            "--noiri-delay": f"{format_number(delay)}s",
+        },
+    )
+
+    add_class(el, "noiri-animate")
+    el.set("data-noiri-animate", motion_type)
+
+    appear_id = el.get("data-framer-appear-id")
+    if appear_id:
+        el.set("data-noiri-appear", appear_id)
+        del el.attrib["data-framer-appear-id"]
+
+    return style_with_motion
+
+
+def normalize_motion_markup(doc: html.HtmlElement, appear_animations: dict[str, dict[str, object]]) -> None:
     for el in doc.iter():
         style_value = el.get("style")
         if not style_value:
             continue
         force_motion_reset = el.get("data-framer-appear-id") is not None
-        if not force_motion_reset and "opacity:" not in style_value and "will-change:" not in style_value:
+        motion_type = classify_motion_element(el, style_value, force_motion_reset=force_motion_reset)
+        if not force_motion_reset and motion_type is None and "opacity:" not in style_value and "will-change:" not in style_value:
             continue
+        appear_id = el.get("data-framer-appear-id") or ""
+        appear_config = appear_animations.get(appear_id)
         new_style = normalize_style(style_value, force_motion_reset=force_motion_reset)
+        if force_motion_reset:
+            new_style = apply_appear_style(new_style, style_value, appear_config)
+        if motion_type:
+            new_style = annotate_motion_element(
+                el,
+                style_value,
+                new_style,
+                motion_type,
+                appear_config,
+            )
         if new_style:
             el.set("style", new_style)
         elif "style" in el.attrib:
@@ -760,6 +985,12 @@ def inject_runtime_helpers(doc: html.HtmlElement, page_route: str) -> None:
     if head is None or body is None:
         return
 
+    head.append(
+        html.fragment_fromstring(
+            "<script>document.documentElement.classList.add('noiri-motion-enabled')</script>"
+        )
+    )
+
     style_href = route_relative_href(page_route, "/") + "assets/local/site.css"
     head.append(
         html.fragment_fromstring(
@@ -787,6 +1018,7 @@ def rewrite_page(route: str) -> None:
     if route != "/404" or response.status_code < 400:
         response.raise_for_status()
     doc = html.fromstring(decode_text_response(response), base_url=page_url)
+    appear_animations = extract_appear_animations(doc)
 
     for base in doc.xpath("//base"):
         parent = base.getparent()
@@ -924,7 +1156,7 @@ def rewrite_page(route: str) -> None:
         if script.text:
             script.text = rewrite_inline_script(script.text, page_url, page_output_path(route), route)
 
-    normalize_motion_markup(doc)
+    normalize_motion_markup(doc, appear_animations)
     clean_style_blocks(doc)
     clean_runtime_attributes(doc)
     clean_inert_links(doc)
