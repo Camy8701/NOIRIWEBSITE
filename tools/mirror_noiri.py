@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import html as html_stdlib
+import json
 import mimetypes
 import os
 import re
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import requests
 from lxml import html
@@ -41,6 +43,7 @@ PAGE_ROUTES = [
 ]
 TEXT_EXTENSIONS = {
     ".css",
+    ".framercms",
     ".html",
     ".js",
     ".json",
@@ -102,6 +105,16 @@ REPO_ROOT = SCRIPT_DIR.parent
 ASSETS_ROOT = REPO_ROOT / "assets"
 MIRROR_ROOT = ASSETS_ROOT / "mirror"
 LOCAL_ASSETS_ROOT = ASSETS_ROOT / "local"
+BUILD_VERSION = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+VERSIONED_EXTENSIONS = {".css", ".framercms", ".js", ".json", ".mjs", ".webmanifest", ".xml"}
+VERCEL_CONFIG = {
+    "headers": [
+        {
+            "source": "/(.*)",
+            "headers": [{"key": "Cache-Control", "value": "no-store"}],
+        }
+    ]
+}
 SESSION = requests.Session()
 SESSION.headers.update(
     {
@@ -112,6 +125,7 @@ SESSION.headers.update(
     }
 )
 ASSET_CACHE: dict[str, Path] = {}
+INERT_FRAMER_HREF = "javascript:void(0)"
 
 
 def normalize_route(path: str) -> str:
@@ -147,13 +161,39 @@ def asset_relative_href(from_output: Path, to_output: Path) -> str:
     return os.path.relpath(to_output, start=from_output.parent).replace(os.sep, "/")
 
 
+def strip_url_suffix(value: str) -> str:
+    return value.split("#", 1)[0].split("?", 1)[0]
+
+
+def versioned_href(href: str) -> str:
+    parts = urlsplit(href)
+    if Path(parts.path).suffix.lower() not in VERSIONED_EXTENSIONS:
+        return href
+
+    query_parts = [part for part in parts.query.split("&") if part and not part.startswith("v=")]
+    query_parts.append(f"v={BUILD_VERSION}")
+    return urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, "&".join(query_parts), parts.fragment)
+    )
+
+
 def should_keep_external_link(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.scheme in {"mailto", "tel"} or (
         parsed.scheme in {"http", "https"}
         and parsed.netloc not in ALLOWED_PAGE_HOSTS
+        and parsed.netloc not in {"framer.com", "www.framer.com", "framer.link"}
         and parsed.netloc not in {"events.framer.com"}
     )
+
+
+def neutralize_framer_link(url: str) -> str | None:
+    parsed = urlparse(url)
+    if parsed.netloc in {"framer.link", "www.framer.com"}:
+        return INERT_FRAMER_HREF
+    if parsed.netloc == "framer.com" and parsed.path != "/edit/init.mjs":
+        return INERT_FRAMER_HREF
+    return None
 
 
 def is_page_url(url: str) -> bool:
@@ -268,7 +308,7 @@ def rewrite_css_urls(css_text: str, source_url: str, output_path: Path) -> str:
         absolute = urljoin(source_url, html_stdlib.unescape(raw_url))
         if should_localize_asset(absolute):
             local_output = localize_asset(absolute)
-            rel = asset_relative_href(output_path, local_output)
+            rel = versioned_href(asset_relative_href(output_path, local_output))
             return f'url("{rel}")'
         if is_page_url(absolute):
             route = page_route_from_url(absolute)
@@ -286,11 +326,25 @@ def rewrite_css_urls(css_text: str, source_url: str, output_path: Path) -> str:
 
 
 def patch_framer_module(text: str, output_path: Path) -> str:
-    editor_stub_rel = asset_relative_href(output_path, LOCAL_ASSETS_ROOT / "framer-editor-init.mjs")
+    editor_stub_rel = versioned_href(
+        asset_relative_href(output_path, LOCAL_ASSETS_ROOT / "framer-editor-init.mjs")
+    )
     text = EDITOR_INIT_PATTERN.sub(f'import(`{editor_stub_rel}`)', text)
     text = text.replace(
         "e.url.startsWith(`https://framerusercontent.com/third-party-assets/fontshare/`)?`fontshare`",
         "e.url.includes(`/third-party-assets/fontshare/`)?`fontshare`",
+    )
+    text = text.replace("https://www.framer.com/contact/", INERT_FRAMER_HREF)
+    text = re.sub(
+        r"\b\w+\.open\(`javascript:void\(0\)\)\}`\)",
+        "void 0",
+        text,
+    )
+    text = re.sub(
+        r"function bt\(e,t\)\{let n=t instanceof Error\?t\.stack\?\?t\.message:t;return.*?\}function xt",
+        "function bt(e,t){let n=t instanceof Error?t.stack??t.message:t;return n?`${e?`${e}\\n`:``}${n}`:`.`}function xt",
+        text,
+        flags=re.S,
     )
     text = CANONICAL_PATTERN.sub(
         "siteCanonicalURL:window.location.origin+(window.__NOIRI_BASE_PATH__||``)",
@@ -305,14 +359,14 @@ def patch_framer_module(text: str, output_path: Path) -> str:
 
 def rewrite_text_urls(text: str, source_url: str, output_path: Path, page_route: str | None = None) -> str:
     def localize_runtime_spec(spec: str) -> str | None:
-        candidate = (output_path.parent / spec).resolve()
+        candidate = (output_path.parent / strip_url_suffix(spec)).resolve()
         try:
             candidate.relative_to(REPO_ROOT)
         except ValueError:
             candidate = None
         if candidate is not None and candidate.exists():
             return spec
-        absolute = urljoin(source_url, spec)
+        absolute = urljoin(source_url, strip_url_suffix(spec))
         if not should_localize_asset(absolute):
             return None
         local_output = localize_asset(absolute)
@@ -325,7 +379,7 @@ def rewrite_text_urls(text: str, source_url: str, output_path: Path, page_route:
         cms_base = modules_url.replace("/modules/", "/cms/", 1)
         cms_url = urljoin(cms_base, relative_file)
         local_output = localize_asset(cms_url)
-        rel = asset_relative_href(output_path, local_output)
+        rel = versioned_href(asset_relative_href(output_path, local_output))
         return f"new URL(`{rel}`,import.meta.url).href"
 
     def replace_absolute(match: re.Match[str]) -> str:
@@ -334,10 +388,13 @@ def rewrite_text_urls(text: str, source_url: str, output_path: Path, page_route:
             return ""
         if raw_url == "https://framer.com/edit/init.mjs":
             local_output = LOCAL_ASSETS_ROOT / "framer-editor-init.mjs"
-            return asset_relative_href(output_path, local_output)
+            return versioned_href(asset_relative_href(output_path, local_output))
+        neutralized = neutralize_framer_link(raw_url)
+        if neutralized:
+            return neutralized
         if should_localize_asset(raw_url):
             local_output = localize_asset(raw_url)
-            return asset_relative_href(output_path, local_output)
+            return versioned_href(asset_relative_href(output_path, local_output))
         route = page_route_from_url(raw_url)
         if route:
             if page_route:
@@ -347,10 +404,11 @@ def rewrite_text_urls(text: str, source_url: str, output_path: Path, page_route:
 
     def ensure_relative_asset(match: re.Match[str]) -> str:
         spec = match.group("spec")
-        absolute = urljoin(source_url, spec)
+        absolute = urljoin(source_url, strip_url_suffix(spec))
         if should_localize_asset(absolute):
             localize_asset(absolute)
-        return match.group(0)
+        quote = match.group("quote")
+        return f"{quote}{versioned_href(spec)}{quote}"
 
     def rewrite_runtime_asset_literal(match: re.Match[str]) -> str:
         spec = match.group("spec")
@@ -358,7 +416,7 @@ def rewrite_text_urls(text: str, source_url: str, output_path: Path, page_route:
         if rel is None:
             return match.group(0)
         quote = match.group("quote")
-        return f"new URL({quote}{rel}{quote},import.meta.url).href"
+        return f"new URL({quote}{versioned_href(rel)}{quote},import.meta.url).href"
 
     def rewrite_runtime_srcset(match: re.Match[str]) -> str:
         parts: list[str] = []
@@ -372,7 +430,7 @@ def rewrite_text_urls(text: str, source_url: str, output_path: Path, page_route:
             if rel is None:
                 return match.group(0)
             descriptor = f" {' '.join(bits[1:])}" if len(bits) > 1 else ""
-            parts.append(f"${{new URL(`{rel}`,import.meta.url).href}}{descriptor}")
+            parts.append(f"${{new URL(`{versioned_href(rel)}`,import.meta.url).href}}{descriptor}")
         return f"srcSet:`{', '.join(parts)}`"
 
     rewritten = FRAMER_CMS_PATTERN.sub(replace_framer_cms, text)
@@ -436,7 +494,7 @@ def rewrite_srcset(srcset: str, source_url: str, page_output: Path) -> str:
         bits = item.split()
         absolute = urljoin(source_url, html_stdlib.unescape(bits[0]))
         if should_localize_asset(absolute):
-            bits[0] = asset_relative_href(page_output, localize_asset(absolute))
+            bits[0] = versioned_href(asset_relative_href(page_output, localize_asset(absolute)))
         rewritten.append(" ".join(bits))
     return ", ".join(rewritten)
 
@@ -486,7 +544,7 @@ def inject_runtime_helpers(doc: html.HtmlElement, page_route: str) -> None:
 
     form_handler_src = route_relative_href(page_route, "/") + "assets/local/form-handler.js"
     form_script = html.fragment_fromstring(
-        f'<script src="{form_handler_src}" defer></script>'
+        f'<script src="{versioned_href(form_handler_src)}" defer></script>'
     )
     body.append(form_script)
 
@@ -522,7 +580,10 @@ def rewrite_page(route: str) -> None:
                 parent.remove(script)
             continue
         if should_localize_asset(absolute):
-            script.set("src", asset_relative_href(page_output_path(route), localize_asset(absolute)))
+            script.set(
+                "src",
+                versioned_href(asset_relative_href(page_output_path(route), localize_asset(absolute))),
+            )
 
     for link in doc.xpath("//link[@href]"):
         href = link.get("href")
@@ -536,7 +597,10 @@ def rewrite_page(route: str) -> None:
                 parent.remove(link)
             continue
         if should_localize_asset(absolute):
-            link.set("href", asset_relative_href(page_output_path(route), localize_asset(absolute)))
+            link.set(
+                "href",
+                versioned_href(asset_relative_href(page_output_path(route), localize_asset(absolute))),
+            )
             continue
         target_route = page_route_from_url(absolute)
         if target_route:
@@ -557,7 +621,10 @@ def rewrite_page(route: str) -> None:
                 parent.remove(meta)
             continue
         if should_localize_asset(absolute):
-            meta.set("content", asset_relative_href(page_output_path(route), localize_asset(absolute)))
+            meta.set(
+                "content",
+                versioned_href(asset_relative_href(page_output_path(route), localize_asset(absolute))),
+            )
             continue
         target_route = page_route_from_url(absolute)
         if target_route:
@@ -577,11 +644,21 @@ def rewrite_page(route: str) -> None:
             if not href:
                 continue
             absolute = urljoin(page_url, html_stdlib.unescape(href))
+            neutralized = neutralize_framer_link(absolute)
+            if neutralized:
+                el.set("href", neutralized)
+                for attr in ("target", "rel"):
+                    if attr in el.attrib:
+                        del el.attrib[attr]
+                continue
             target_route = page_route_from_url(absolute)
             if target_route:
                 el.set("href", route_relative_href(route, target_route))
             elif should_localize_asset(absolute):
-                el.set("href", asset_relative_href(page_output_path(route), localize_asset(absolute)))
+                el.set(
+                    "href",
+                    versioned_href(asset_relative_href(page_output_path(route), localize_asset(absolute))),
+                )
             elif not should_keep_external_link(absolute):
                 el.set("href", href)
             continue
@@ -596,7 +673,10 @@ def rewrite_page(route: str) -> None:
                 continue
             absolute = urljoin(page_url, html_stdlib.unescape(value))
             if should_localize_asset(absolute):
-                el.set(attr, asset_relative_href(page_output_path(route), localize_asset(absolute)))
+                el.set(
+                    attr,
+                    versioned_href(asset_relative_href(page_output_path(route), localize_asset(absolute))),
+                )
 
         srcset = el.get("srcset")
         if srcset:
@@ -608,7 +688,10 @@ def rewrite_page(route: str) -> None:
                 continue
             absolute = urljoin(page_url, html_stdlib.unescape(value))
             if should_localize_asset(absolute):
-                el.set(attr, asset_relative_href(page_output_path(route), localize_asset(absolute)))
+                el.set(
+                    attr,
+                    versioned_href(asset_relative_href(page_output_path(route), localize_asset(absolute))),
+                )
 
     for script in doc.xpath("//script[not(@src)]"):
         if script.text:
@@ -628,6 +711,7 @@ def rewrite_page(route: str) -> None:
 def write_support_files() -> None:
     ensure_parent(REPO_ROOT / ".nojekyll")
     (REPO_ROOT / ".nojekyll").write_text("", encoding="utf-8")
+    (REPO_ROOT / "vercel.json").write_text(json.dumps(VERCEL_CONFIG, indent=2) + "\n", encoding="utf-8")
 
 
 def mirror_site(routes: Iterable[str]) -> None:
