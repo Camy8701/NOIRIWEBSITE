@@ -82,6 +82,15 @@
   opacity: 1;
 }
 
+[data-framer-name="Studio Name"] {
+  width: min(100%, 1400px) !important;
+}
+
+[data-framer-name="Studio Name"] .framer-fit-text p {
+  font-size: clamp(80px, 10vw, 128px) !important;
+  letter-spacing: -0.055em !important;
+}
+
 @media (max-width: 809px) {
   .noiri-site-nav {
     align-items: flex-start;
@@ -99,6 +108,11 @@
 
   .noiri-site-nav__link {
     font-size: 11px;
+  }
+
+  [data-framer-name="Studio Name"] .framer-fit-text p {
+    font-size: clamp(54px, 15vw, 88px) !important;
+    letter-spacing: -0.04em !important;
   }
 }
 
