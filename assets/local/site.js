@@ -47,6 +47,57 @@
     });
   }
 
+  function getStandaloneNavPrefix() {
+    const path = window.location.pathname.replace(/\/index\.html$/u, "/");
+    if (/\/projects\/[^/]+\/?$/u.test(path)) return "../../";
+    if (/\/(?:about|services|projects|contact|privacy-policy|terms-conditions|404)\/?$/u.test(path)) {
+      return "../";
+    }
+    return "./";
+  }
+
+  function getStandaloneNavCurrent() {
+    const path = window.location.pathname.replace(/\/index\.html$/u, "/");
+    if (/\/about\/?$/u.test(path)) return "about";
+    if (/\/services\/?$/u.test(path)) return "services";
+    if (/\/projects(?:\/[^/]+)?\/?$/u.test(path)) return "projects";
+    if (/\/contact\/?$/u.test(path)) return "contact";
+    return "home";
+  }
+
+  function initStandaloneNav() {
+    if (document.querySelector(".noiri-site-nav")) return;
+
+    const prefix = getStandaloneNavPrefix();
+    const current = getStandaloneNavCurrent();
+    const links = [
+      { id: "home", label: "Home", href: prefix },
+      { id: "about", label: "About", href: `${prefix}about/` },
+      { id: "services", label: "Services", href: `${prefix}services/` },
+      { id: "projects", label: "Projects", href: `${prefix}projects/` },
+      { id: "contact", label: "Contact", href: `${prefix}contact/` },
+    ];
+
+    const nav = document.createElement("div");
+    nav.className = "noiri-site-nav";
+    nav.innerHTML = `
+      <a class="noiri-site-nav__logo" href="${prefix}">KODAK BLACK</a>
+      <nav class="noiri-site-nav__links" aria-label="Primary">
+        ${links
+          .map(
+            (link) => `
+              <a class="noiri-site-nav__link${link.id === current ? " is-active" : ""}" href="${link.href}">
+                <span>${link.label}</span>
+              </a>
+            `,
+          )
+          .join("")}
+      </nav>
+    `;
+
+    document.body.appendChild(nav);
+  }
+
   function setServiceState(row, open) {
     const panel = row.querySelector(".noiri-service-panel");
     const openClass = row.getAttribute("data-noiri-service-open-class") || "framer-v-14lylx1";
@@ -432,6 +483,7 @@
     initMotion();
     initProcessAnimation();
     initMobileMenu();
+    initStandaloneNav();
     initServiceAccordion();
     initNestedLinks();
   });
