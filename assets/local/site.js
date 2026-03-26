@@ -214,22 +214,22 @@
       introAsset,
       {
         id: "discovery",
-        src: resolveAsset("./assets/local/process/discovery.png"),
+        src: resolveAsset("gallery/gallery-08.webp"),
         alt: "Cinematic portrait in urban streetwear",
       },
       {
         id: "concepting",
-        src: resolveAsset("./assets/local/process/concepting.png"),
+        src: resolveAsset("gallery/gallery-09.webp"),
         alt: "High-end editorial indoor portrait",
       },
       {
         id: "production",
-        src: resolveAsset("./assets/local/process/production.png"),
+        src: resolveAsset("gallery/gallery-10.webp"),
         alt: "Side profile photography with warm lighting",
       },
       {
         id: "post-production",
-        src: resolveAsset("./assets/local/process/post-production.png"),
+        src: resolveAsset("gallery/gallery-11.webp"),
         alt: "Minimalist studio fashion portrait",
       },
       {
